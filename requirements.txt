@@ -1,0 +1,10 @@
+torch==1.7.0
+class-resolver==0.3.10
+torch-scatter==2.0.7
+torch-sparse==0.6.9
+torch-cluster==1.5.9
+torch-geometric==2.0.4
+ndlib==5.1.1
+geopy==2.1.0
+seaborn
+matplotlib
