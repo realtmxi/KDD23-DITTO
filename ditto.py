@@ -192,6 +192,8 @@ def q_train(data, bpar, args):
         pbar.set_description(f'[step={step}] loss={loss.item():.4f}')
         q_net.backward(loss, zI0, zR0, zI, zR)
         opt.step()
+        # Log the loss to wandb
+        wandb.log({"loss": loss.item(), "step": step})
     q_net.eval()
     return q_net
 
@@ -237,6 +239,23 @@ def main(data):
         return y_pred
 
 args = get_args()
+
+# start a new wandb run to track this script
+wandb.init(
+    # set the wandb project where this run will be logged
+    project="ditto",
+
+    # track hyperparameters and run metadata
+    config={
+    "learning_rate":args.q_lr,
+    "dataset": args.dataset,
+    }
+)
+
+
 tester = Tester(args.data_dir, args.device, main)
 tester.test([args.dataset], seed = args.seed, rep = 1)
 tester.save(args.output)
+
+# Finish the wandb run
+wandb.finish()
