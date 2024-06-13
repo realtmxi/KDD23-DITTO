@@ -62,27 +62,47 @@ class BPar(nn.Module):
     def dict(self):
         return Dict(pI = self.pI.item(), pR = self.pR.item())
 
-def b_lik(bpar, data): # yT: (nodes,)
+def b_lik(bpar, data, lSs, lIs, lRs): # yT: (nodes,)
+    """
+    lik: pseudolikelihood
+    """
     device = data.y.device
     n_nodes = data.num_nodes
     T = data.T.item()
     ei = data.edge_index
-    I0 = (data.y[:, 0] == 1).sum()
-    pI, pR = bpar.pI, bpar.pR
-    lSs, lIs, lRs = [], [], []
-    lIs.append(torch.full((n_nodes,), I0 / n_nodes, dtype = torch.float, device = device))
-    lSs.append(torch.full((n_nodes,), 1. - I0 / n_nodes, dtype = torch.float, device = device))
-    lRs.append(torch.zeros(n_nodes, dtype = torch.float, device = device))
+    # I0 = (data.y[:, 0] == 1).sum()
+    # pI, pR = bpar.pI, bpar.pR
+    # lSs, lIs, lRs = [], [], []
+    # lIs.append(torch.full((n_nodes,), I0 / n_nodes, dtype = torch.float, device = device))
+    # lSs.append(torch.full((n_nodes,), 1. - I0 / n_nodes, dtype = torch.float, device = device))
+    # lRs.append(torch.zeros(n_nodes, dtype = torch.float, device = device))
+
+    # Initialize lists to store probabilities over time
+    lSs_list, lIs_list, lRs_list = [], [], []
+    lSs_list.append(lSs)
+    lIs_list.append(lIs)
+    lRs_list.append(lRs)
+
     for t in range(T):
         aI = pysc.scatter_mul(src = (1. - lIs[-1] * pI)[ei[0]], dim = 0, index = ei[1], dim_size = n_nodes)
-        lS = lSs[-1] * aI
-        kI = lIs[-1] + lSs[-1] * (1. - aI)
-        lI = kI * (1. - pR)
-        lR = lRs[-1] + kI * pR
-        lSs.append(lS)
-        lIs.append(lI)
-        lRs.append(lR)
-    lik = torch.stack([lSs[-1], lIs[-1], lRs[-1]], dim = 0) # (states, nodes)
+        #lS = lSs[-1] * aI
+        lS = lSs_list[-1] * aI
+        #kI = lIs[-1] + lSs[-1] * (1. - aI)
+        kI = lIs_list[-1] + lSs_list[-1] * (1 - aI)
+        #lI = kI * (1. - pR)
+        lI = kI * (1. - bpar.pR)
+        #lR = lRs[-1] + kI * pR
+        lR = lRs_list[-1] + kI * bpar.pR
+        # lSs.append(lS)
+        # lIs.append(lI)
+        # lRs.append(lR)
+        lSs_list.append(lS)
+        lIs_list.append(lI)
+        lRs_list.append(lR)
+
+    #lik = torch.stack([lSs[-1], lIs[-1], lRs[-1]], dim = 0) # (states, nodes)
+    lik = torch.stack([lSs_list[-1], lIs_list[-1], lRs_list[-1]], dim=0)
+
     yT = data.y[:, -1].unsqueeze(dim = 0) # (1, nodes)
     lik = lik.gather(dim = 0, index = yT) # (1, nodes)
     lik = torch_log(lik).mean()
@@ -100,10 +120,33 @@ def b_estim(data, args):
     bpar.train()
     opt = optim.AdamW(bpar.parameters(), lr = args.b_lr, betas = (0.5, 0.5))
     pbar = trange(1, args.b_steps + 1)
+
+    num_snapshots = data.y.size(1)
+
     for step in pbar:
         opt.zero_grad()
-        loss = -b_lik(bpar, data)
-        loss.backward()
+        total_loss = 0
+        for s in range(num_snapshots):
+            snapshot_data = deepcopy(data)
+            snapshot_data.y = data.y[:, s, :]
+
+            # Initialize lSs, lIs, lRs for the snapshot
+            initial_susceptible = torch.full((n_nodes,), 1. - (
+                        snapshot_data.y[:, 0] == 1).sum() / n_nodes,
+                                             dtype=torch.float, device=device)
+            initial_infected = torch.full((n_nodes,), (
+                        snapshot_data.y[:, 0] == 1).sum() / n_nodes,
+                                          dtype=torch.float, device=device)
+            initial_recovered = torch.zeros(n_nodes, dtype=torch.float,
+                                            device=device)
+
+            loss = -b_lik(bpar, snapshot_data, initial_susceptible,
+                          initial_infected, initial_recovered)
+            total_loss += loss
+        total_loss /= num_snapshots
+        # loss = -b_lik(bpar, data)
+        # loss.backward()
+        total_loss.backward()
         opt.step()
         bpar.clamp_()
         pbar.set_description(f'[step={step}] {bpar}')

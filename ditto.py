@@ -132,18 +132,32 @@ class QNet(nn.Module):
         z0.backward(torch.stack([self.clamp_grad(zI0, zI.grad), self.clamp_grad(zR0, zR.grad)], dim = 0))
     @torch.no_grad()
     def samp(self, y, zI, zR, n_samples, compute_lik = False): # y: (nodes,); zI, zR: (T, nodes, 1)
+        """
+        Require supp(Q_theta(y_T)) = supp(P | y_T)
+        zI: latent infection variables
+        zR: latent recovery variables
+        """
         zI, uid = zI.sort(dim = 1, descending = True) # (T, nodes, 1)
+        # Indices of nodes sorted by infection probability in descending order
         uid = uid.squeeze(dim = 2) # (T, nodes)
+
+        # compute infection probabilities and sample infection outcomes
         qI = torch.sigmoid(zI) # (T, nodes, 1) # prob of I->S
         xI = SIR_STATES.I - qI.expand(-1, -1, n_samples).bernoulli().long() # (T, nodes, samples) # 1 for I->S
         lI = torch_log(torch.where(xI != SIR_STATES.I, qI, 1. - qI)) # (T, nodes, samples)
+
+        # compute recovery probabilities and sample recovery outcomes
         qR = torch.sigmoid(zR) # (T, nodes, 1) # prob of R->I
         xR = SIR_STATES.R - qR.expand(-1, -1, n_samples).bernoulli().long() # (T, nodes, samples) # 1 for R->I
         lR = torch_log(torch.where(xR != SIR_STATES.R, qR, 1. - qR)) # (T, nodes, samples)
+
         y = y.unsqueeze(dim = 1).expand(-1, n_samples) # (nodes, samples)
+
+        # Initialize an empty tensor to store the sampled histories
         Y = torch.empty(self.T, self.n_nodes, n_samples, dtype = torch.long, device = self.device) # (T, nodes, samples)
         if compute_lik:
             lik = self.zero
+
         for t in range(self.T - 1, -1, -1):
             # R->I
             msk = (y == SIR_STATES.R) # (nodes, samples)
@@ -171,9 +185,67 @@ class QNet(nn.Module):
             lik = lik.detach().clone()
             return Y, lik
         else:
-            return Y 
+            return Y
+@torch.no_grad()
+def samp(self, y, zI, zR, n_samples, snapshots, compute_lik=False):
+    zI, uid = zI.sort(dim=1, descending=True)
+    uid = uid.squeeze(dim=2)
+
+    qI = torch.sigmoid(zI)
+    xI = SIR_STATES.I - qI.expand(-1, -1, n_samples).bernoulli().long()
+    lI = torch_log(torch.where(xI != SIR_STATES.I, qI, 1. - qI))
+
+    qR = torch.sigmoid(zR)
+    xR = SIR_STATES.R - qR.expand(-1, -1, n_samples).bernoulli().long()
+    lR = torch_log(torch.where(xR != SIR_STATES.R, qR, 1. - qR))
+
+    # Initialize to store sampled histories for all snapshots
+    all_Y = torch.zeros(len(snapshots), self.T, self.n_nodes, n_samples, dtype=y.dtype, device=y.device)
+
+    for i, snapshot in enumerate(snapshots):
+        y = snapshot.unsqueeze(dim=1).expand(-1, n_samples)
+        Y = torch.empty(self.T, self.n_nodes, n_samples, dtype=y.dtype, device=y.device)
+
+        if compute_lik:
+            lik = self.zero
+
+        for t in range(self.T - 1, -1, -1):
+            msk = (y == SIR_STATES.R)
+            y = torch.where(msk, xR[t], y)
+            if compute_lik:
+                lik = lik + torch.where(msk, lR[t], self.zero).sum(dim=0)
+
+            msk = (y == SIR_STATES.I)
+            rem = torch.where(msk, self.rem, self.n_inf)
+            for j, u in enumerate(uid[t]):
+                if msk[u].max():
+                    vid = self.neighbs[u.item()]
+                    opt = (rem[u] > 1) & (rem[vid].min(dim=0).values > 1)
+                    msk_opt = msk[u] & opt
+                    y[u] = torch.where(msk_opt, xI[t, j], y[u])
+                    trs = (y[u] != SIR_STATES.I)
+                    rem[u] = torch.where(msk[u], torch.where(trs, rem[u] - 1, self.n_inf), rem[u])
+                    rem[vid] = torch.where(msk[u].unsqueeze(dim=0), torch.where(trs.unsqueeze(dim=0), rem[vid] - 1, self.n_inf), rem[vid])
+                    msk[u] = msk_opt
+
+            Y[t] = y
+            if compute_lik:
+                lik = lik + torch.where(msk[uid[t]], lI[t], self.zero).sum(dim=0)
+
+        all_Y[i] = Y.detach().clone()
+        if compute_lik:
+            lik = lik.detach().clone()
+
+    if compute_lik:
+        return all_Y, lik
+    else:
+        return all_Y
 
 def q_loss(q_net, data, I0, bpar, n_samples):
+    """
+    Eq 25
+    Return the negative mean log-likelihood for proposal distribution.
+    """
     T = data.T.item()
     n_nodes = data.num_nodes
     Y = diffus_gen(T = T, n_nodes = n_nodes, edge_index = data.edge_index, I0 = I0, n_samples = n_samples, pI = bpar.pI, pR = bpar.pR) # (T+1, nodes, samples)
@@ -198,16 +270,16 @@ def q_train(data, bpar, args):
     return q_net
 
 @torch.no_grad()
-def t_mcmc(data, bpar, q_net, args, keepdim = True):
+def t_mcmc(data, bpar, q_net, args, snapshots, keepdim = True):
     I0 = (data.y[:, 0] == 1).long().sum().item()
     zI, zR = q_net(data.y[:, -1 :]) # (T, nodes, 1)
-    X, lqX = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, compute_lik = True) # (T, nodes, samples)
+    X, lqX = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, snapshots=snapshots, compute_lik = True) # (T, nodes, samples)
     lpX = diffus_liks(Y = X, edge_index = data.edge_index, I0 = I0, coef = args.p_coef, pI = bpar.pI, pR = bpar.pR) # (samples,)
     tI_avg = data_make_t(X, SIR_STATES.I, dim = 0).float().mean(dim = 1, keepdim = keepdim) # (nodes, 1)
     tR_avg = data_make_t(X, SIR_STATES.R, dim = 0).float().mean(dim = 1, keepdim = keepdim) # (nodes, 1)
     pbar = trange(1, args.t_steps + 1)
     for step in pbar:
-        Y, lqY = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, compute_lik = True) # (T, nodes, samples)
+        Y, lqY = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, snapshots=snapshots, compute_lik = True) # (T, nodes, samples)
         lpY = diffus_liks(Y = Y, edge_index = data.edge_index, I0 = I0, coef = args.p_coef, pI = bpar.pI, pR = bpar.pR) # (samples,)
         a = torch.rand(args.t_samples, device = args.device) <= torch.exp(lpY + lqX - lpX - lqY) # (samples,) # Hastings MCMC
         X = torch.where(a, Y, X) # (T, nodes, samples)
@@ -225,8 +297,10 @@ def main(data):
     print(f'[est] pI={bpar.pI:.4f}, pR={bpar.pR:.4f}', flush = True)
     # train a proposal network
     q_net = q_train(data, bpar, args)
+
+    snapshots = data.snapshots
     # estimate transition times
-    tI, tR = t_mcmc(data, bpar, q_net, args, keepdim = True) # (nodes, 1)
+    tI, tR = t_mcmc(data, bpar, q_net, args, snapshots=snapshots, keepdim = True) # (nodes, 1)
     T = data.T.item()
     tI = tI.round().long()
     tR = tR.round().long()
