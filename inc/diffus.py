@@ -1,3 +1,5 @@
+import torch
+
 from inc.utils import *
 
 SIR_STATES = Dict(S = 0, I = 1, R = 2)
@@ -62,9 +64,11 @@ class BPar(nn.Module):
     def dict(self):
         return Dict(pI = self.pI.item(), pR = self.pR.item())
 
-def b_lik(bpar, data, lSs, lIs, lRs): # yT: (nodes,)
+def b_lik(bpar, data, lSs, lIs, lRs, T_s, T_e): # yT: (nodes,)
     """
     lik: pseudolikelihood
+    T_s: start time
+    T_e: end time
     """
     device = data.y.device
     n_nodes = data.num_nodes
@@ -83,7 +87,7 @@ def b_lik(bpar, data, lSs, lIs, lRs): # yT: (nodes,)
     lIs_list.append(lIs)
     lRs_list.append(lRs)
 
-    for t in range(T):
+    for t in range(T_s, T_e):
         aI = pysc.scatter_mul(src = (1. - lIs[-1] * pI)[ei[0]], dim = 0, index = ei[1], dim_size = n_nodes)
         #lS = lSs[-1] * aI
         lS = lSs_list[-1] * aI
@@ -103,7 +107,7 @@ def b_lik(bpar, data, lSs, lIs, lRs): # yT: (nodes,)
     #lik = torch.stack([lSs[-1], lIs[-1], lRs[-1]], dim = 0) # (states, nodes)
     lik = torch.stack([lSs_list[-1], lIs_list[-1], lRs_list[-1]], dim=0)
 
-    yT = data.y[:, -1].unsqueeze(dim = 0) # (1, nodes)
+    yT = data.y[:, T_e].unsqueeze(dim = 0) # (1, nodes)
     lik = lik.gather(dim = 0, index = yT) # (1, nodes)
     lik = torch_log(lik).mean()
     return lik
@@ -121,31 +125,39 @@ def b_estim(data, args):
     opt = optim.AdamW(bpar.parameters(), lr = args.b_lr, betas = (0.5, 0.5))
     pbar = trange(1, args.b_steps + 1)
 
-    num_snapshots = data.y.size(1)
+    # num_snapshots = data.y.size(1)
+    num_snapshots = len(data.obs)
 
     for step in pbar:
         opt.zero_grad()
         total_loss = 0
-        for s in range(num_snapshots):
-            snapshot_data = deepcopy(data)
-            snapshot_data.y = data.y[:, s, :]
 
-            # Initialize lSs, lIs, lRs for the snapshot
+        # Initialize lSs, lIs, lRs for the snapshot
+        if data.obs[0] != 0:
             initial_susceptible = torch.full((n_nodes,), 1. - (
-                        snapshot_data.y[:, 0] == 1).sum() / n_nodes,
+                    data.y[:, 0] == 1).sum() / n_nodes,
                                              dtype=torch.float, device=device)
             initial_infected = torch.full((n_nodes,), (
-                        snapshot_data.y[:, 0] == 1).sum() / n_nodes,
+                    data.y[:, 0] == 1).sum() / n_nodes,
                                           dtype=torch.float, device=device)
             initial_recovered = torch.zeros(n_nodes, dtype=torch.float,
                                             device=device)
 
-            loss = -b_lik(bpar, snapshot_data, initial_susceptible,
-                          initial_infected, initial_recovered)
-            total_loss += loss
-        total_loss /= num_snapshots
-        # loss = -b_lik(bpar, data)
-        # loss.backward()
+            loss = -b_lik(bpar, data, initial_susceptible,
+                          initial_infected, initial_recovered, 0, data.obs[0])
+            total_loss = total_loss + loss
+
+        for s in range(1, num_snapshots):
+            # utilize previous snapshot
+            initial_susceptible = (data.y[:, data.obs[s-1]] == SIR_STATES.S).to(torch.float)
+            initial_infected = (data.y[:, data.obs[s-1]] == SIR_STATES.I).to(torch.float)
+            initial_recovered = (data.y[:, data.obs[s-1]] == SIR_STATES.R).to(torch.float)
+
+            loss = -b_lik(bpar, data, initial_susceptible,
+                          initial_infected, initial_recovered, data.obs[s-1], data.obs[s])
+            total_loss = total_loss + loss
+        total_loss = total_loss / num_snapshots
+
         total_loss.backward()
         opt.step()
         bpar.clamp_()

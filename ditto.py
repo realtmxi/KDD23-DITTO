@@ -295,6 +295,7 @@ def main(data):
     # estimate diffusion parameters
     bpar = b_estim(data, args)
     print(f'[est] pI={bpar.pI:.4f}, pR={bpar.pR:.4f}', flush = True)
+
     # train a proposal network
     q_net = q_train(data, bpar, args)
 
