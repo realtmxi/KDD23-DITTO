@@ -88,7 +88,7 @@ def b_lik(bpar, data, lSs, lIs, lRs, T_s, T_e): # yT: (nodes,)
     lRs_list.append(lRs)
 
     for t in range(T_s, T_e):
-        aI = pysc.scatter_mul(src = (1. - lIs[-1] * pI)[ei[0]], dim = 0, index = ei[1], dim_size = n_nodes)
+        aI = pysc.scatter_mul(src = (1. - lIs_list[-1] * bpar.pI)[ei[0]], dim = 0, index = ei[1], dim_size = n_nodes)
         #lS = lSs[-1] * aI
         lS = lSs_list[-1] * aI
         #kI = lIs[-1] + lSs[-1] * (1. - aI)
@@ -142,9 +142,12 @@ def b_estim(data, args):
                                           dtype=torch.float, device=device)
             initial_recovered = torch.zeros(n_nodes, dtype=torch.float,
                                             device=device)
-
+            
             loss = -b_lik(bpar, data, initial_susceptible,
                           initial_infected, initial_recovered, 0, data.obs[0])
+            if loss.isinf():
+                import pdb
+                pdb.set_trace()
             total_loss = total_loss + loss
 
         for s in range(1, num_snapshots):
@@ -155,7 +158,11 @@ def b_estim(data, args):
 
             loss = -b_lik(bpar, data, initial_susceptible,
                           initial_infected, initial_recovered, data.obs[s-1], data.obs[s])
+            if loss.isinf():
+                import pdb
+                pdb.set_trace()
             total_loss = total_loss + loss
+            wandb.log({'pi': bpar.pI.item(), 'pr': bpar.pR.item(), 'loss': loss.item()})
         total_loss = total_loss / num_snapshots
 
         total_loss.backward()

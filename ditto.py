@@ -38,8 +38,9 @@ class QNet(nn.Module):
             mlp = args.q_mlp,
             n_nodes = data.num_nodes,
             zlim = args.q_zlim,
+            n_obs = len(data.obs)
         ).to(args.device)
-    def __init__(self, eidx, T, hid, gnn, mlp, n_nodes, zlim):
+    def __init__(self, eidx, T, hid, gnn, mlp, n_nodes, zlim, n_obs):
         super().__init__()
         self.eidx = eidx
         self.device = self.eidx.device
@@ -52,7 +53,7 @@ class QNet(nn.Module):
         self.gnn_dep = int(gnn)
         self.mlp_dep = int(mlp)
         self.w = nn.Parameter(data = torch.randn((self.n_edges, self.hid), dtype = torch.float32, device = self.device), requires_grad = True)
-        self.gnn = GNN(v_in = 1, e_in = self.hid, hid = self.hid, dep = self.gnn_dep)
+        self.gnn = GNN(v_in = n_obs, e_in = self.hid, hid = self.hid, dep = self.gnn_dep)
         self.mlp = MLP([self.hid] * self.mlp_dep + [2 * self.T])
         self.rem = (pyg.utils.degree(self.eidx[1], num_nodes = self.n_nodes).long().unsqueeze(dim = 1) + 1).detach().clone() # (nodes, 1)
         self.neighbs = [[] for u in range(self.n_nodes)]
@@ -187,7 +188,7 @@ class QNet(nn.Module):
         else:
             return Y
 @torch.no_grad()
-def samp(self, y, zI, zR, n_samples, snapshots, compute_lik=False):
+def samp(self, y, zI, zR, n_samples, data, compute_lik=False):
     zI, uid = zI.sort(dim=1, descending=True)
     uid = uid.squeeze(dim=2)
 
@@ -199,39 +200,20 @@ def samp(self, y, zI, zR, n_samples, snapshots, compute_lik=False):
     xR = SIR_STATES.R - qR.expand(-1, -1, n_samples).bernoulli().long()
     lR = torch_log(torch.where(xR != SIR_STATES.R, qR, 1. - qR))
 
-    # Initialize to store sampled histories for all snapshots
-    all_Y = torch.zeros(len(snapshots), self.T, self.n_nodes, n_samples, dtype=y.dtype, device=y.device)
+    all_Y = torch.empty(self.T+1, self.n_nodes, n_samples, dtype=y.dtype, device=y.device)
+    all_Y[data.obs] = data.y[:, data.obs].T.unsqueeze(dim = -1)
 
-    for i, snapshot in enumerate(snapshots):
-        y = snapshot.unsqueeze(dim=1).expand(-1, n_samples)
+    for i, s in enumerate(data.obs):
+        y = all_Y[s].unsqueeze(dim=1).expand(-1, n_samples)
         Y = torch.empty(self.T, self.n_nodes, n_samples, dtype=y.dtype, device=y.device)
 
         if compute_lik:
             lik = self.zero
-
-        for t in range(self.T - 1, -1, -1):
-            msk = (y == SIR_STATES.R)
-            y = torch.where(msk, xR[t], y)
-            if compute_lik:
-                lik = lik + torch.where(msk, lR[t], self.zero).sum(dim=0)
-
-            msk = (y == SIR_STATES.I)
-            rem = torch.where(msk, self.rem, self.n_inf)
-            for j, u in enumerate(uid[t]):
-                if msk[u].max():
-                    vid = self.neighbs[u.item()]
-                    opt = (rem[u] > 1) & (rem[vid].min(dim=0).values > 1)
-                    msk_opt = msk[u] & opt
-                    y[u] = torch.where(msk_opt, xI[t, j], y[u])
-                    trs = (y[u] != SIR_STATES.I)
-                    rem[u] = torch.where(msk[u], torch.where(trs, rem[u] - 1, self.n_inf), rem[u])
-                    rem[vid] = torch.where(msk[u].unsqueeze(dim=0), torch.where(trs.unsqueeze(dim=0), rem[vid] - 1, self.n_inf), rem[vid])
-                    msk[u] = msk_opt
-
-            Y[t] = y
-            if compute_lik:
-                lik = lik + torch.where(msk[uid[t]], lI[t], self.zero).sum(dim=0)
-
+        if i == 0:
+            for t in range(s - 1, -1, -1):
+                
+        else:
+            # set cover for the observed nodes
         all_Y[i] = Y.detach().clone()
         if compute_lik:
             lik = lik.detach().clone()
@@ -272,7 +254,7 @@ def q_train(data, bpar, args):
 @torch.no_grad()
 def t_mcmc(data, bpar, q_net, args, snapshots, keepdim = True):
     I0 = (data.y[:, 0] == 1).long().sum().item()
-    zI, zR = q_net(data.y[:, -1 :]) # (T, nodes, 1)
+    zI, zR = q_net(data.y[:, data.obs]) # (T, nodes, 1)
     X, lqX = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, snapshots=snapshots, compute_lik = True) # (T, nodes, samples)
     lpX = diffus_liks(Y = X, edge_index = data.edge_index, I0 = I0, coef = args.p_coef, pI = bpar.pI, pR = bpar.pR) # (samples,)
     tI_avg = data_make_t(X, SIR_STATES.I, dim = 0).float().mean(dim = 1, keepdim = keepdim) # (nodes, 1)

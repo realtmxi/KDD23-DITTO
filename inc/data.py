@@ -22,7 +22,9 @@ def data_simulate(Gnx, seed, T, diffus, params):
     data = pyg.utils.from_networkx(Gnx)
     data.T = torch.tensor(T, dtype = data.y.dtype, device = data.y.device)
     data.tI = data_make_t(data.y, SIR_STATES.I)
+    np.random.seed(seed)
     data.obs = sorted(np.random.choice(T, size = 3, replace = False).tolist()) + [T]
+    data.obs = torch.tensor(data.obs, dtype = data.y.dtype, device = data.y.device)
     if sir:
         data.tR = data_make_t(data.y, SIR_STATES.R)
     return data
