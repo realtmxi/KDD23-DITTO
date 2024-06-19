@@ -211,10 +211,46 @@ def samp(self, y, zI, zR, n_samples, data, compute_lik=False):
             lik = self.zero
         if i == 0:
             for t in range(s - 1, -1, -1):
-                
+                msk = (y == SIR_STATES.R)
+                y = torch.where(msk, xR[t], y)
+                if compute_lik:
+                    lik = lik + torch.where(msk, lR[t], self.zero).sum(dim=0)
+
+                msk = (y == SIR_STATES.I)
+                rem = torch.where(msk, self.rem, self.n_inf)
+                for idx, u in enumerate(uid[t]):
+                    if msk[u].max():
+                        vid = self.neighbs[u.item()]
+                        opt = (rem[u] > 1) & (rem[vid].min(dim=0).values > 1)
+                        msk_opt = msk[u] & opt
+                        y[u] = torch.where(msk_opt, xI[t, idx], y[u])
+                        trs = (y[u] != SIR_STATES.I)
+                        rem[u] = torch.where(msk[u], torch.where(trs, rem[u] - 1, self.n_inf), rem[u])
+                        rem[vid] = torch.where(msk[u].unsqueeze(dim=0), torch.where(trs.unsqueeze(dim=0), rem[vid] - 1, self.n_inf), rem[vid])
+                        msk[u] = msk_opt
+                Y[t] = y
+                if compute_lik:
+                    lik = lik + torch.where(msk[uid[t]], lI[t], self.zero).sum(dim=0)
         else:
             # set cover for the observed nodes
-        all_Y[i] = Y.detach().clone()
+            for t in range(s - 1, -1, -1):
+                msk = (y == SIR_STATES.R)
+                y = torch.where(msk, xR[t], y)
+                msk = (y == SIR_STATES.I)
+                rem = torch.where(msk, self.rem, self.n_inf)
+                for idx, u in enumerate(uid[t]):
+                    if msk[u].max():
+                        vid = self.neighbs[u.item()]
+                        opt = (rem[u] > 1) & (rem[vid].min(dim=0).values > 1)
+                        msk_opt = msk[u] & opt
+                        y[u] = torch.where(msk_opt, torch.where(torch.rand(n_samples) < qI[t, idx], xI[t, idx], y[u]), y[u])
+                        trs = (y[u] != SIR_STATES.I)
+                    rem[u] = torch.where(msk[u], torch.where(trs, rem[u] - 1, self.n_inf), rem[u])
+                    rem[vid] = torch.where(msk[u].unsqueeze(dim=0), torch.where(trs.unsqueeze(dim=0), rem[vid] - 1, self.n_inf), rem[vid])
+                    msk[u] = msk_opt
+            Y[t] = y
+
+        all_Y[s] = Y.detach().clone()
         if compute_lik:
             lik = lik.detach().clone()
 
