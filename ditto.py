@@ -1,6 +1,7 @@
 from inc.diffus import *
 from inc.nn import *
 from inc.test import *
+import pdb
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -31,53 +32,61 @@ class QNet(nn.Module):
     @classmethod
     def make(cls, data, args):
         return cls(
-            eidx = data.edge_index,
-            T = data.T.item(),
-            hid = args.q_hid,
-            gnn = args.q_gnn,
-            mlp = args.q_mlp,
-            n_nodes = data.num_nodes,
-            zlim = args.q_zlim,
-            n_obs = len(data.obs)
+            eidx=data.edge_index,
+            T=data.T.item(),
+            hid=args.q_hid,
+            gnn=args.q_gnn,
+            mlp=args.q_mlp,
+            n_nodes=data.num_nodes,
+            zlim=args.q_zlim,
+            n_obs=len(data.obs)  # Added parameter
         ).to(args.device)
-    def __init__(self, eidx, T, hid, gnn, mlp, n_nodes, zlim, n_obs):
+
+    def __init__(self, eidx, T, hid, gnn, mlp, n_nodes, zlim, n_obs):  # Added parameter
         super().__init__()
         self.eidx = eidx
         self.device = self.eidx.device
         self.n_nodes = n_nodes
         self.n_inf = self.n_nodes + 2
-        self.n_edges = self.eidx.size(dim = 1)
+        self.n_edges = self.eidx.size(dim=1)
         self.zlim = zlim
         self.T = T
         self.hid = int(hid)
         self.gnn_dep = int(gnn)
         self.mlp_dep = int(mlp)
-        self.w = nn.Parameter(data = torch.randn((self.n_edges, self.hid), dtype = torch.float32, device = self.device), requires_grad = True)
-        self.gnn = GNN(v_in = n_obs, e_in = self.hid, hid = self.hid, dep = self.gnn_dep)
+        self.n_obs = n_obs  # Added parameter
+        self.w = nn.Parameter(data=torch.randn((self.n_edges, self.hid), dtype=torch.float32, device=self.device), requires_grad=True)
+        self.gnn = GNN(v_in=n_obs, e_in=self.hid, hid=self.hid, dep=self.gnn_dep)  # Modified
         self.mlp = MLP([self.hid] * self.mlp_dep + [2 * self.T])
-        self.rem = (pyg.utils.degree(self.eidx[1], num_nodes = self.n_nodes).long().unsqueeze(dim = 1) + 1).detach().clone() # (nodes, 1)
+        self.rem = (pyg.utils.degree(self.eidx[1], num_nodes=self.n_nodes).long().unsqueeze(dim=1) + 1).detach().clone()  # (nodes, 1)
         self.neighbs = [[] for u in range(self.n_nodes)]
         for i in range(self.n_edges):
             self.neighbs[self.eidx[0, i].item()].append(self.eidx[1, i].item())
         for u in range(self.n_nodes):
-            self.neighbs[u] = torch.tensor(self.neighbs[u], dtype = torch.long, device = self.device)
-        self.zero = torch.tensor(0., dtype = torch.float, device = self.device)
+            self.neighbs[u] = torch.tensor(self.neighbs[u], dtype=torch.long, device=self.device)
+        self.zero = torch.tensor(0., dtype=torch.float, device=self.device)
+
     def clamp_z(self, z):
         return z.clamp(-self.zlim, self.zlim)
-    def forward(self, y, orig = False): # y: (nodes, samples)
+
+    def forward(self, y, orig=False):  # y: (nodes, samples)
         n_nodes, n_samples = y.size()
-        y = y.T.reshape((-1, 1)) # (samples*nodes, 1)
-        eidx = (self.eidx.unsqueeze(dim = 1) + n_nodes * torch.arange(n_samples, dtype = torch.long, device = y.device).unsqueeze(dim = -1)).reshape((2, -1)) # (2, samples*edges)
-        w = self.w.repeat(n_samples, 1) # (samples, hid)
+        y = y.T.reshape((-1, self.n_obs))  # (samples*nodes, n_obs)  # Adjusting the reshape to include n_obs
+        eidx = (self.eidx.unsqueeze(dim=1) + n_nodes * torch.arange(n_samples, dtype=torch.long, device=y.device).unsqueeze(dim=-1)).reshape((2, -1))  # (2, samples*edges)
+        w = self.w.repeat(n_samples, 1)  # (samples, hid)
+
+        print(f'y: {y.shape}, eidx: {eidx.shape}, w: {w.shape}')
+        
         z, e = self.gnn(y.float(), eidx, w)
-        z = self.mlp(z) # (samples*nodes, 2*T)
-        z = z.T.reshape((2 * self.T, n_samples, -1)) # (2*T, samples, nodes)
-        zI, zR = z[: self.T], z[self.T :] # (T, samples, nodes)
-        zI, zR = zI.transpose(1, 2), zR.transpose(1, 2) # (T, nodes, samples)
+        z = self.mlp(z)  # (samples*nodes, 2*T)
+        z = z.T.reshape((2 * self.T, n_samples, -1))  # (2*T, samples, nodes)
+        zI, zR = z[: self.T], z[self.T :]  # (T, samples, nodes)
+        zI, zR = zI.transpose(1, 2), zR.transpose(1, 2)  # (T, nodes, samples)
         if orig:
             return zI, zR, self.clamp_z(zI), self.clamp_z(zR)
         else:
             return self.clamp_z(zI), self.clamp_z(zR)
+        
     def lik(self, Y): # Y: (T+1, nodes, samples)
         n_samples = Y.size(dim = 2)
         zI0, zR0, zI, zR = self.forward(Y[-1], orig = True) # (T, nodes, samples)
@@ -131,62 +140,7 @@ class QNet(nn.Module):
         loss.backward()
         z0 = torch.stack([zI0, zR0], dim = 0)
         z0.backward(torch.stack([self.clamp_grad(zI0, zI.grad), self.clamp_grad(zR0, zR.grad)], dim = 0))
-    @torch.no_grad()
-    def samp(self, y, zI, zR, n_samples, compute_lik = False): # y: (nodes,); zI, zR: (T, nodes, 1)
-        """
-        Require supp(Q_theta(y_T)) = supp(P | y_T)
-        zI: latent infection variables
-        zR: latent recovery variables
-        """
-        zI, uid = zI.sort(dim = 1, descending = True) # (T, nodes, 1)
-        # Indices of nodes sorted by infection probability in descending order
-        uid = uid.squeeze(dim = 2) # (T, nodes)
 
-        # compute infection probabilities and sample infection outcomes
-        qI = torch.sigmoid(zI) # (T, nodes, 1) # prob of I->S
-        xI = SIR_STATES.I - qI.expand(-1, -1, n_samples).bernoulli().long() # (T, nodes, samples) # 1 for I->S
-        lI = torch_log(torch.where(xI != SIR_STATES.I, qI, 1. - qI)) # (T, nodes, samples)
-
-        # compute recovery probabilities and sample recovery outcomes
-        qR = torch.sigmoid(zR) # (T, nodes, 1) # prob of R->I
-        xR = SIR_STATES.R - qR.expand(-1, -1, n_samples).bernoulli().long() # (T, nodes, samples) # 1 for R->I
-        lR = torch_log(torch.where(xR != SIR_STATES.R, qR, 1. - qR)) # (T, nodes, samples)
-
-        y = y.unsqueeze(dim = 1).expand(-1, n_samples) # (nodes, samples)
-
-        # Initialize an empty tensor to store the sampled histories
-        Y = torch.empty(self.T, self.n_nodes, n_samples, dtype = torch.long, device = self.device) # (T, nodes, samples)
-        if compute_lik:
-            lik = self.zero
-
-        for t in range(self.T - 1, -1, -1):
-            # R->I
-            msk = (y == SIR_STATES.R) # (nodes, samples)
-            y = torch.where(msk, xR[t], y) # (nodes, samples)
-            if compute_lik:
-                lik = lik + torch.where(msk, lR[t], self.zero).sum(dim = 0) # (samples,)
-            # I->S
-            msk = (y == SIR_STATES.I) # (nodes, samples)
-            rem = torch.where(msk, self.rem, self.n_inf) # (nodes, samples)
-            for i, u in enumerate(uid[t]):
-                if msk[u].max():
-                    vid = self.neighbs[u.item()] # (neighbs,)
-                    opt = (rem[u] > 1) & (rem[vid].min(dim = 0).values > 1) # (samples,)
-                    msk_opt = msk[u] & opt
-                    y[u] = torch.where(msk_opt, xI[t, i], y[u]) # (samples,)
-                    trs = (y[u] != SIR_STATES.I) # (samples,)
-                    rem[u] = torch.where(msk[u], torch.where(trs, rem[u] - 1, self.n_inf), rem[u]) # (samples,)
-                    rem[vid] = torch.where(msk[u].unsqueeze(dim = 0), torch.where(trs.unsqueeze(dim = 0), rem[vid] - 1, self.n_inf), rem[vid]) # (neighbs, samples)
-                    msk[u] = msk_opt
-            Y[t] = y
-            if compute_lik:
-                lik = lik + torch.where(msk[uid[t]], lI[t], self.zero).sum(dim = 0) # (samples,)
-        Y = Y.detach().clone()
-        if compute_lik:
-            lik = lik.detach().clone()
-            return Y, lik
-        else:
-            return Y
 @torch.no_grad()
 def samp(self, y, zI, zR, n_samples, data, compute_lik=False):
     zI, uid = zI.sort(dim=1, descending=True)
@@ -283,7 +237,7 @@ def q_train(data, bpar, args):
         q_net.backward(loss, zI0, zR0, zI, zR)
         opt.step()
         # Log the loss to wandb
-        wandb.log({"loss": loss.item(), "step": step})
+        #wandb.log({"loss": loss.item(), "step": step})
     q_net.eval()
     return q_net
 
@@ -291,13 +245,13 @@ def q_train(data, bpar, args):
 def t_mcmc(data, bpar, q_net, args, snapshots, keepdim = True):
     I0 = (data.y[:, 0] == 1).long().sum().item()
     zI, zR = q_net(data.y[:, data.obs]) # (T, nodes, 1)
-    X, lqX = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, snapshots=snapshots, compute_lik = True) # (T, nodes, samples)
+    X, lqX = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, data=data, compute_lik = True) # (T, nodes, samples)
     lpX = diffus_liks(Y = X, edge_index = data.edge_index, I0 = I0, coef = args.p_coef, pI = bpar.pI, pR = bpar.pR) # (samples,)
     tI_avg = data_make_t(X, SIR_STATES.I, dim = 0).float().mean(dim = 1, keepdim = keepdim) # (nodes, 1)
     tR_avg = data_make_t(X, SIR_STATES.R, dim = 0).float().mean(dim = 1, keepdim = keepdim) # (nodes, 1)
     pbar = trange(1, args.t_steps + 1)
     for step in pbar:
-        Y, lqY = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, snapshots=snapshots, compute_lik = True) # (T, nodes, samples)
+        Y, lqY = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, data=data, compute_lik = True) # (T, nodes, samples)
         lpY = diffus_liks(Y = Y, edge_index = data.edge_index, I0 = I0, coef = args.p_coef, pI = bpar.pI, pR = bpar.pR) # (samples,)
         a = torch.rand(args.t_samples, device = args.device) <= torch.exp(lpY + lqX - lpX - lqY) # (samples,) # Hastings MCMC
         X = torch.where(a, Y, X) # (T, nodes, samples)
@@ -334,16 +288,16 @@ def main(data):
 args = get_args()
 
 # start a new wandb run to track this script
-wandb.init(
-    # set the wandb project where this run will be logged
-    project="ditto",
+# wandb.init(
+#     # set the wandb project where this run will be logged
+#     project="ditto",
 
-    # track hyperparameters and run metadata
-    config={
-    "learning_rate":args.q_lr,
-    "dataset": args.dataset,
-    }
-)
+#     # track hyperparameters and run metadata
+#     config={
+#     "learning_rate":args.q_lr,
+#     "dataset": args.dataset,
+#     }
+# )
 
 
 tester = Tester(args.data_dir, args.device, main)
@@ -351,4 +305,4 @@ tester.test([args.dataset], seed = args.seed, rep = 1)
 tester.save(args.output)
 
 # Finish the wandb run
-wandb.finish()
+# wandb.finish()
