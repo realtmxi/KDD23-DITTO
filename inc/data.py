@@ -291,4 +291,23 @@ def data_load(dataset, data_dir, device):
     assert dataset in DATASETS, 'unknown dataset'
     data = DATASETS[dataset](data_dir, device)
     data.name = dataset
+
+    max_gap = max(data.obs[t] - data.obs[t - 1] for t in range(1, len(data.obs)))
+
+    # with torch.no_grad():
+    #     data.reachable = torch.zeros((max_gap + 1, data.num_nodes, data.num_nodes), dtype = torch.bool, device = device)
+
+    #     data.reachable[0] = torch.eye(data.num_nodes, dtype = torch.bool, device = device)
+    #     for t in range(1, max_gap + 1):
+    #         data.reachable[t] = torch.scatter_reduce(data.reachable[t - 1], dim = 0, index = data.edge_index[0, None].expand(-1, data.num_nodes), src = data.reachable[t - 1, data.edge_index[1]], reduce = 'amax', include_self = True)
+    
+    with torch.no_grad():
+        data.reachable = torch.zeros((max_gap + 1, data.num_nodes, data.num_nodes), dtype=torch.bool, device=device)
+        data.reachable[0] = torch.eye(data.num_nodes, dtype=torch.bool, device=device)
+
+        for t in range(1, max_gap + 1):
+            reachability = data.reachable[t - 1][data.edge_index[1]]
+            reachability, _ = torch.max(reachability, dim=0, keepdim=True)
+            data.reachable[t] = torch.max(data.reachable[t - 1], reachability)
+    
     return data
