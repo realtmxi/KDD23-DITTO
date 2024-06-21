@@ -162,7 +162,7 @@ def b_estim(data, args):
                 import pdb
                 pdb.set_trace()
             total_loss = total_loss + loss
-            wandb.log({'pi': bpar.pI.item(), 'pr': bpar.pR.item(), 'loss': loss.item()})
+            #wandb.log({'pi': bpar.pI.item(), 'pr': bpar.pR.item(), 'loss': loss.item()})
         total_loss = total_loss / num_snapshots
 
         total_loss.backward()

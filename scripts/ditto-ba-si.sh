@@ -1,10 +1,10 @@
-cd .. && python3 ./ditto.py \
+cd .. && python ./ditto.py \
     --dataset ba-si \
     --seed 123456789 \
     --data_dir input \
     --output output/ditto-ba-si.pt \
     --device $1 \
-    --b_pI0 1e-6 \
+    --b_pI0 0.5 \
     --b_pR0 1e-6 \
     --b_steps 500 \
     --b_lr 0.003 \
@@ -18,4 +18,5 @@ cd .. && python3 ./ditto.py \
     --p_coef 1.0 \
     --t_samples 100 \
     --t_steps 10 \
-    --t_keep 0.5
+    --t_keep 0.5 \
+    --debug

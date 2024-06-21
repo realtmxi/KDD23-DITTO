@@ -25,6 +25,7 @@ def get_args():
     parser.add_argument('--t_samples', type = int, help = 'MCMC sample size')
     parser.add_argument('--t_steps', type = int, help = 'MCMC steps')
     parser.add_argument('--t_keep', type = float, help = 'moving average in MCMC')
+    parser.add_argument('--debug', action='store_true', help='enable debug mode to skip training and only sample')
     args = parser.parse_args()
     return args
 
@@ -78,10 +79,16 @@ class QNet(nn.Module):
         print(f'y: {y.shape}, eidx: {eidx.shape}, w: {w.shape}')
         
         z, e = self.gnn(y.float(), eidx, w)
+
+        print(f'z (before mlp): {z.shape}, e: {e.shape}')
+
         z = self.mlp(z)  # (samples*nodes, 2*T)
         z = z.T.reshape((2 * self.T, n_samples, -1))  # (2*T, samples, nodes)
         zI, zR = z[: self.T], z[self.T :]  # (T, samples, nodes)
         zI, zR = zI.transpose(1, 2), zR.transpose(1, 2)  # (T, nodes, samples)
+        
+        print(f'zI: {zI.shape}, zR: {zR.shape}')
+
         if orig:
             return zI, zR, self.clamp_z(zI), self.clamp_z(zR)
         else:
@@ -242,10 +249,11 @@ def q_train(data, bpar, args):
     return q_net
 
 @torch.no_grad()
-def t_mcmc(data, bpar, q_net, args, snapshots, keepdim = True):
+def t_mcmc(data, bpar, q_net, args, keepdim = True):
     I0 = (data.y[:, 0] == 1).long().sum().item()
     zI, zR = q_net(data.y[:, data.obs]) # (T, nodes, 1)
     X, lqX = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, data=data, compute_lik = True) # (T, nodes, samples)
+    pdb.set_trace()
     lpX = diffus_liks(Y = X, edge_index = data.edge_index, I0 = I0, coef = args.p_coef, pI = bpar.pI, pR = bpar.pR) # (samples,)
     tI_avg = data_make_t(X, SIR_STATES.I, dim = 0).float().mean(dim = 1, keepdim = keepdim) # (nodes, 1)
     tR_avg = data_make_t(X, SIR_STATES.R, dim = 0).float().mean(dim = 1, keepdim = keepdim) # (nodes, 1)
@@ -269,11 +277,23 @@ def main(data):
     print(f'[est] pI={bpar.pI:.4f}, pR={bpar.pR:.4f}', flush = True)
 
     # train a proposal network
-    q_net = q_train(data, bpar, args)
+    q_net = QNet.make(data, args)
+    if not args.debug:
+        q_net = q_train(data, bpar, args)
+    else:
+        q_net.eval()
 
-    snapshots = data.snapshots
+    # Directly sample if in debug mode
+    if args.debug:
+        with torch.no_grad():
+            zI, zR = q_net(data.y[:, data.obs]) # (T, nodes, 1)
+            X, lqX = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, data=data, compute_lik = True)
+            print("Sampled histories (X):")
+            print(X)
+            return
+
     # estimate transition times
-    tI, tR = t_mcmc(data, bpar, q_net, args, snapshots=snapshots, keepdim = True) # (nodes, 1)
+    tI, tR = t_mcmc(data, bpar, q_net, args, keepdim = True) # (nodes, 1)
     T = data.T.item()
     tI = tI.round().long()
     tR = tR.round().long()
