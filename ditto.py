@@ -1,7 +1,7 @@
 from inc.diffus import *
 from inc.nn import *
 from inc.test import *
-
+import pdb
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type = str, help = 'dataset name')
@@ -24,6 +24,7 @@ def get_args():
     parser.add_argument('--t_samples', type = int, help = 'MCMC sample size')
     parser.add_argument('--t_steps', type = int, help = 'MCMC steps')
     parser.add_argument('--t_keep', type = float, help = 'moving average in MCMC')
+    parser.add_argument('--debug', action='store_true', help='enable debug mode to skip training and only sample')
     args = parser.parse_args()
     return args
 
@@ -132,6 +133,8 @@ class QNet(nn.Module):
         z0.backward(torch.stack([self.clamp_grad(zI0, zI.grad), self.clamp_grad(zR0, zR.grad)], dim = 0))
     @torch.no_grad()
     def samp(self, y, zI, zR, n_samples, compute_lik = False): # y: (nodes,); zI, zR: (T, nodes, 1)
+        import pdb
+        pdb.set_trace()
         zI, uid = zI.sort(dim = 1, descending = True) # (T, nodes, 1)
         uid = uid.squeeze(dim = 2) # (T, nodes)
         qI = torch.sigmoid(zI) # (T, nodes, 1) # prob of I->S
@@ -200,6 +203,7 @@ def t_mcmc(data, bpar, q_net, args, keepdim = True):
     I0 = (data.y[:, 0] == 1).long().sum().item()
     zI, zR = q_net(data.y[:, -1 :]) # (T, nodes, 1)
     X, lqX = q_net.samp(data.y[:, -1], zI, zR, args.t_samples, compute_lik = True) # (T, nodes, samples)
+    pdb.set_trace()
     lpX = diffus_liks(Y = X, edge_index = data.edge_index, I0 = I0, coef = args.p_coef, pI = bpar.pI, pR = bpar.pR) # (samples,)
     tI_avg = data_make_t(X, SIR_STATES.I, dim = 0).float().mean(dim = 1, keepdim = keepdim) # (nodes, 1)
     tR_avg = data_make_t(X, SIR_STATES.R, dim = 0).float().mean(dim = 1, keepdim = keepdim) # (nodes, 1)
@@ -217,12 +221,78 @@ def t_mcmc(data, bpar, q_net, args, keepdim = True):
         tR_avg = args.t_keep * tR_avg + (1. - args.t_keep) * tR # (nodes, 1)
     return tI_avg, tR_avg # (nodes, 1)
 
+def generate_sample(data, q_net, args):
+    with torch.no_grad():
+        zI, zR = q_net(data.y[:, -1:])  # (T, nodes, 1)
+        X = q_net.samp(data.y[:, -1], zI, zR, args.t_samples)  # (T, nodes, samples)
+    return X
+
+def plot_diffusion(X, sample_index=0):
+    T, n_nodes, n_samples = X.shape
+    sample_history = X[:, :, sample_index].cpu().numpy()  # Select a sample and move it to CPU
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    im = ax.imshow(sample_history, aspect='auto', cmap='viridis')
+
+    ax.set_xlabel('Nodes')
+    ax.set_ylabel('Time Steps')
+    ax.set_title('Diffusion History for Sample {}'.format(sample_index))
+    fig.colorbar(im, ax=ax)
+    plt.show()
+
 def main(data):
     # estimate diffusion parameters
     bpar = b_estim(data, args)
-    print(f'[est] pI={bpar.pI:.4f}, pR={bpar.pR:.4f}', flush = True)
+    print(f'[est] pI={bpar.pI:.4f}, pR={bpar.pR:.4f}', flush=True)
+    
     # train a proposal network
-    q_net = q_train(data, bpar, args)
+    q_net = QNet.make(data, args)
+    if not args.debug:
+        q_net = q_train(data, bpar, args)
+    else:
+        q_net.eval()
+
+    # Generate sample history
+    sample_history = generate_sample(data, q_net, args)
+    
+    # Calculate likelihood
+    I0 = (data.y[:, 0] == 1).long().sum().item()
+
+    lpX = diffus_liks(Y=sample_history, 
+                      edge_index=data.edge_index, 
+                      I0=I0, 
+                      coef=args.p_coef, 
+                      pI=bpar.pI, 
+                      pR=bpar.pR)
+    
+    print(f"log-likelihood components: {lpX}")
+    print(f"Mean log-loglikelihood: {lpX.mean().item()}")
+    print(f"max log-likelihood: {lpX.max().item()}")
+    print(f"min log-likelihood: {lpX.min().item()}")
+    
+    likelihood = lpX.exp()
+    log_likelihood = lpX
+
+    print(f"Log-likelihood of sample history: {log_likelihood.mean().item()}")
+    print(f"Likelihood of sample history: {likelihood.mean().item()}")
+
+    # Visualize the first sample
+    plot_diffusion(sample_history)
+
+    if args.debug:
+        return sample_history, likelihood
+
+    # The rest of your original main function...
+    tI, tR = t_mcmc(data, bpar, q_net, args, keepdim=True)
+    T = data.T.item()
+    tI = tI.round().long()
+    tR = tR.round().long()
+    with torch.no_grad():
+        y_pred = torch.zeros_like(data.y)
+        y_pred.scatter_(dim=1, index=torch.minimum(tI, data.T), src=torch.full_like(tI, 1))
+        y_pred.scatter_(dim=1, index=torch.minimum(tR, data.T), src=torch.full_like(tR, 2))
+        y_pred = y_pred[:, :data.T.item()].cummax(dim=1).values
+        return y_pred
     # estimate transition times
     tI, tR = t_mcmc(data, bpar, q_net, args, keepdim = True) # (nodes, 1)
     T = data.T.item()
