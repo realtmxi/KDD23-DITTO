@@ -107,7 +107,7 @@ class QNet(nn.Module):
         else:
             return self.clamp_z(zI), self.clamp_z(zR)
 
-    def compute_transition_mask(self, t, Y, rem):
+    def compute_transition_mask(self, t, Y, rem, data):
         """
         A helper function for lik, to compute the transitoin mask:
         rem_{t, i} > 1 && for all j in N(i): rem_{t, j} > 1
@@ -121,14 +121,18 @@ class QNet(nn.Module):
         transition_mask = torch.zeros((n_nodes, n_samples), dtype=torch.bool, device=self.device)
         
         infected = (Y[t] == SIR_STATES.I)
-        
+        # reachable
+        prev_s = max([s for s in data.obs if s <= t], default=0)
+        reachable = data.reachable[t - prev_s]
+
         # Set cover
         uncovered = infected.clone()
         while uncovered.any():
             coverage_count = torch.zeros((n_nodes, n_samples), dtype=torch.long, device=self.device)
             for i in range(n_nodes):
-                if len(self.neighbs[i]) > 0:
-                    coverage_count[i] = (uncovered[self.neighbs[i]] & (rem[t, self.neighbs[i]] > 1)).sum(dim=0)
+                vid = torch.nonzero(reachable[i], as_tuple=False).squeeze()
+                if vid.numel() > 0:
+                    coverage_count[i] = (uncovered[vid] & (rem[t, vid] > 1)).sum(dim=0)
             
             best_coverage, best_node = coverage_count.max(dim=0)
             
@@ -139,14 +143,15 @@ class QNet(nn.Module):
                 if best_coverage[i] > 0:
                     node = best_node[i]
                     transition_mask[node, i] = True
-                    uncovered[self.neighbs[node], i] &= ~(rem[t, self.neighbs[node], i] > 1)
+                    vid = torch.nonzero(reachable[node], as_tuple = False).squeeze()
+                    uncovered[vid, i] &= ~(rem[t, vid, i] > 1)
         
         # include nodes that can transition based on remaining infections
         transition_mask |= (rem[t] > 1)
         
         return transition_mask
 
-    def lik(self, Y, obs): # Y: (T+1, nodes, samples)
+    def lik(self, Y, obs, data): # Y: (T+1, nodes, samples)
         n_samples = Y.size(dim=2)
         n_obs = len(self.obs)
         print(f"n samples: {n_samples.shape}")
@@ -204,7 +209,7 @@ class QNet(nn.Module):
         lik_backward = self.zero
 
         for t in range(self.T - 1, -1, -1):
-            transition_mask = self.compute_transition_mask(t, Y, rem)
+            transition_mask = self.compute_transition_mask(t, Y, rem, data)
             
             # R -> I or R -> S
             mask_R = (Y[t+1] == SIR_STATES.R)
